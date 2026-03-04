@@ -1,12 +1,14 @@
 import * as vscode from 'vscode';
 import { parseVueSfc, getTemplateRange } from '../parsers/vueParser';
 import { parseWxJson } from '../parsers/wxParser';
+import { scanGlobalComponents } from '../parsers/componentResolver';
 import { toKebabCase, escapeRegex } from '../utils/fileUtils';
 
 const COMPONENT_TAG_COLOR = '#4EC9B0';
 
 const componentDecorationType = vscode.window.createTextEditorDecorationType({
   color: COMPONENT_TAG_COLOR,
+  rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
 });
 
 let updateTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -31,6 +33,7 @@ export function activateDecorations(context: vscode.ExtensionContext): void {
 }
 
 function triggerUpdate(editor: vscode.TextEditor): void {
+  if (editor.document.uri.scheme !== 'file') { return; }
   if (updateTimeout) { clearTimeout(updateTimeout); }
   updateTimeout = setTimeout(() => updateDecorations(editor), 200);
 }
@@ -42,7 +45,13 @@ function updateDecorations(editor: vscode.TextEditor): void {
 
   if (filePath.endsWith('.vue')) {
     const parsed = parseVueSfc(text);
-    const names = Array.from(parsed.components.keys());
+    const localNames = Array.from(parsed.components.keys());
+    const globals = scanGlobalComponents(false, filePath);
+    const globalNames = globals
+      .map(g => g.name)
+      .filter(n => !parsed.components.has(n));
+    const names = [...localNames, ...globalNames];
+
     if (names.length === 0) {
       editor.setDecorations(componentDecorationType, []);
       return;
@@ -59,7 +68,12 @@ function updateDecorations(editor: vscode.TextEditor): void {
   } else if (filePath.endsWith('.wxml')) {
     const jsonPath = filePath.replace(/\.wxml$/, '.json');
     const usingComponents = parseWxJson(jsonPath);
-    const names = Array.from(usingComponents.keys());
+    const localNames = Array.from(usingComponents.keys());
+    const globals = scanGlobalComponents(true, filePath);
+    const globalNames = globals
+      .map(g => g.name)
+      .filter(n => !usingComponents.has(n));
+    const names = [...localNames, ...globalNames];
     if (names.length === 0) {
       editor.setDecorations(componentDecorationType, []);
       return;

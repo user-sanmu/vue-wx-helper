@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { parseVueSfc, getTemplateRange, getScriptRange } from '../parsers/vueParser';
 import { parseWxComponent, getWxBasePath, parseWxJson, parseWxComponentProps } from '../parsers/wxParser';
-import { resolveVueComponent, resolveWxComponent, scanGlobalComponents } from '../parsers/componentResolver';
+import { resolveVueComponent, resolveVueComponentByPath, resolveWxComponent, scanGlobalComponents } from '../parsers/componentResolver';
 import { toKebabCase, resolveWxComponentPath } from '../utils/fileUtils';
 import type { PropInfo } from '../types';
 
@@ -10,26 +10,34 @@ import type { PropInfo } from '../types';
 
 function findEnclosingComponentTag(text: string, offset: number, knownComponents: string[]): string | undefined {
   const before = text.substring(0, offset);
-  // Walk backward to find the nearest unmatched `<Tag`
+  let inQuote: string | null = null;
+
   for (let i = before.length - 1; i >= 0; i--) {
-    if (before[i] === '>') {
-      // We hit a closing `>` — might be end of another tag or self-closing
-      // Check for self-closing />
+    const ch = before[i];
+
+    // Track whether we're inside a quoted attribute value (walking backward)
+    if ((ch === '"' || ch === "'") && !inQuote) {
+      inQuote = ch;
+      continue;
+    }
+    if (inQuote && ch === inQuote) {
+      inQuote = null;
+      continue;
+    }
+    if (inQuote) { continue; }
+
+    if (ch === '>') {
       if (i > 0 && before[i - 1] === '/') {
-        // Self-closing tag — skip it
-        // Find the matching `<`
         const openIdx = before.lastIndexOf('<', i - 2);
         if (openIdx >= 0) { i = openIdx; }
         continue;
       }
       return undefined;
     }
-    if (before[i] === '<') {
-      // Found opening `<`, extract tag name
+    if (ch === '<') {
       const afterOpen = before.substring(i + 1);
       const tagMatch = /^\/?\s*([a-zA-Z][\w-]*)/.exec(afterOpen);
       if (tagMatch) {
-        // Skip closing tags
         if (afterOpen.trimStart().startsWith('/')) { return undefined; }
         const tagName = tagMatch[1];
         for (const comp of knownComponents) {
@@ -147,14 +155,24 @@ export class VueCompletionProvider implements vscode.CompletionItemProvider {
     }
 
     // Component prop completion (inside a component tag, after space)
-    const componentNames = Array.from(parsed.components.keys());
-    const enclosing = findEnclosingComponentTag(text, offset, componentNames);
+    const globals = scanGlobalComponents(false, filePath);
+    const globalNames = globals.map(g => g.name).filter(n => !parsed.components.has(n));
+    const allComponentNames = [...Array.from(parsed.components.keys()), ...globalNames];
+    const enclosing = findEnclosingComponentTag(text, offset, allComponentNames);
     if (enclosing) {
       const importPath = parsed.components.get(enclosing);
       if (importPath) {
         const resolved = resolveVueComponent(filePath, importPath);
         for (const prop of resolved.props) {
           items.push(createPropCompletionItem(prop, true));
+        }
+      } else {
+        const globalComp = globals.find(g => g.name === enclosing || toKebabCase(g.name) === enclosing);
+        if (globalComp?.resolvedPath) {
+          const resolved = resolveVueComponentByPath(globalComp.resolvedPath);
+          for (const prop of resolved.props) {
+            items.push(createPropCompletionItem(prop, true));
+          }
         }
       }
       return items;
@@ -239,14 +257,25 @@ export class WxmlCompletionProvider implements vscode.CompletionItemProvider {
     }
 
     // Component attribute completion
-    const componentNames = Array.from(wxComp.usingComponents.keys());
-    const enclosing = findEnclosingComponentTag(text, offset, componentNames);
+    const globals = scanGlobalComponents(true, filePath);
+    const globalNames = globals.map(g => g.name).filter(n => !wxComp.usingComponents.has(n));
+    const allComponentNames = [...Array.from(wxComp.usingComponents.keys()), ...globalNames];
+    const enclosing = findEnclosingComponentTag(text, offset, allComponentNames);
     if (enclosing) {
       const compPath = wxComp.usingComponents.get(enclosing);
       if (compPath) {
         const resolved = resolveWxComponent(filePath, compPath);
         for (const prop of resolved.props) {
           items.push(createPropCompletionItem(prop, false));
+        }
+      } else {
+        const globalComp = globals.find(g => g.name === enclosing);
+        if (globalComp?.resolvedPath) {
+          const compBasePath = globalComp.resolvedPath.replace(/\.(js|json)$/, '');
+          const props = parseWxComponentProps(compBasePath);
+          for (const prop of props) {
+            items.push(createPropCompletionItem(prop, false));
+          }
         }
       }
       return items;

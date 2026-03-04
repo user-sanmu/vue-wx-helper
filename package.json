@@ -30,9 +30,11 @@
           },
           "default": [
             "components",
-            "component"
+            "component",
+            "src/components",
+            "src/component"
           ],
-          "description": "Folders to scan for global components (relative to workspace root)"
+          "description": "Folders to scan for global components (relative to project root)"
         }
       }
     }

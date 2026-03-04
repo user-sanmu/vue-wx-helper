@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { parseVueSfc, getTemplateRange } from '../parsers/vueParser';
 import { parseWxJson, getWxBasePath } from '../parsers/wxParser';
-import { resolveVueComponentPath, resolveWxComponentPath, toKebabCase } from '../utils/fileUtils';
+import { resolveVueComponent, scanGlobalComponents } from '../parsers/componentResolver';
+import { resolveWxComponentPath, toKebabCase } from '../utils/fileUtils';
 
 function getWordAtPosition(text: string, offset: number): { word: string; start: number; end: number } | undefined {
   if (offset < 0 || offset >= text.length) { return undefined; }
@@ -59,12 +60,24 @@ export class VueDefinitionProvider implements vscode.DefinitionProvider {
       }
     }
 
-    if (!importPath) { return undefined; }
+    if (importPath) {
+      const resolved = resolveVueComponent(filePath, importPath);
+      if (resolved.resolvedPath) {
+        return new vscode.Location(vscode.Uri.file(resolved.resolvedPath), new vscode.Position(0, 0));
+      }
+    }
 
-    const resolvedPath = resolveVueComponentPath(filePath, importPath);
-    if (!resolvedPath) { return undefined; }
+    // Fallback: check global components
+    const globals = scanGlobalComponents(false, filePath);
+    for (const g of globals) {
+      if (g.name === tagName || toKebabCase(g.name) === tagName) {
+        if (g.resolvedPath) {
+          return new vscode.Location(vscode.Uri.file(g.resolvedPath), new vscode.Position(0, 0));
+        }
+      }
+    }
 
-    return new vscode.Location(vscode.Uri.file(resolvedPath), new vscode.Position(0, 0));
+    return undefined;
   }
 }
 
@@ -92,23 +105,34 @@ export class WxmlDefinitionProvider implements vscode.DefinitionProvider {
 
     const tagName = wordInfo.word;
     const compPath = usingComponents.get(tagName);
-    if (!compPath) { return undefined; }
 
-    // Resolve to the JS file
-    const resolvedPath = resolveWxComponentPath(filePath, compPath);
-    if (resolvedPath) {
-      return new vscode.Location(vscode.Uri.file(resolvedPath), new vscode.Position(0, 0));
+    if (compPath) {
+      const resolvedPath = resolveWxComponentPath(filePath, compPath);
+      if (resolvedPath) {
+        return new vscode.Location(vscode.Uri.file(resolvedPath), new vscode.Position(0, 0));
+      }
+
+      const dir = path.dirname(filePath);
+      const resolved = path.resolve(dir, compPath);
+      const wxmlPath = resolved + '.wxml';
+      try {
+        require('fs').accessSync(wxmlPath);
+        return new vscode.Location(vscode.Uri.file(wxmlPath), new vscode.Position(0, 0));
+      } catch {
+        // continue to global fallback
+      }
     }
 
-    // Fallback: try the WXML file
-    const dir = path.dirname(filePath);
-    const resolved = path.resolve(dir, compPath);
-    const wxmlPath = resolved + '.wxml';
-    try {
-      require('fs').accessSync(wxmlPath);
-      return new vscode.Location(vscode.Uri.file(wxmlPath), new vscode.Position(0, 0));
-    } catch {
-      return undefined;
+    // Fallback: check global components
+    const globals = scanGlobalComponents(true, filePath);
+    for (const g of globals) {
+      if (g.name === tagName) {
+        if (g.resolvedPath) {
+          return new vscode.Location(vscode.Uri.file(g.resolvedPath), new vscode.Position(0, 0));
+        }
+      }
     }
+
+    return undefined;
   }
 }
