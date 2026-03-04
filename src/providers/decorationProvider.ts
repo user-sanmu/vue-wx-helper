@@ -1,0 +1,105 @@
+import * as vscode from 'vscode';
+import { parseVueSfc, getTemplateRange } from '../parsers/vueParser';
+import { parseWxJson } from '../parsers/wxParser';
+import { toKebabCase, escapeRegex } from '../utils/fileUtils';
+
+const COMPONENT_TAG_COLOR = '#4EC9B0';
+
+const componentDecorationType = vscode.window.createTextEditorDecorationType({
+  color: COMPONENT_TAG_COLOR,
+});
+
+let updateTimeout: ReturnType<typeof setTimeout> | undefined;
+
+export function activateDecorations(context: vscode.ExtensionContext): void {
+  if (vscode.window.activeTextEditor) {
+    triggerUpdate(vscode.window.activeTextEditor);
+  }
+
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(editor => {
+      if (editor) { triggerUpdate(editor); }
+    }),
+    vscode.workspace.onDidChangeTextDocument(event => {
+      const editor = vscode.window.activeTextEditor;
+      if (editor && event.document === editor.document) {
+        triggerUpdate(editor);
+      }
+    }),
+    componentDecorationType,
+  );
+}
+
+function triggerUpdate(editor: vscode.TextEditor): void {
+  if (updateTimeout) { clearTimeout(updateTimeout); }
+  updateTimeout = setTimeout(() => updateDecorations(editor), 200);
+}
+
+function updateDecorations(editor: vscode.TextEditor): void {
+  const filePath = editor.document.uri.fsPath;
+  const text = editor.document.getText();
+  const decorations: vscode.DecorationOptions[] = [];
+
+  if (filePath.endsWith('.vue')) {
+    const parsed = parseVueSfc(text);
+    const names = Array.from(parsed.components.keys());
+    if (names.length === 0) {
+      editor.setDecorations(componentDecorationType, []);
+      return;
+    }
+
+    const templateRange = getTemplateRange(text);
+    if (!templateRange) {
+      editor.setDecorations(componentDecorationType, []);
+      return;
+    }
+
+    const searchText = text.substring(templateRange.start, templateRange.end);
+    findComponentTagDecorations(editor, searchText, templateRange.start, names, decorations);
+  } else if (filePath.endsWith('.wxml')) {
+    const jsonPath = filePath.replace(/\.wxml$/, '.json');
+    const usingComponents = parseWxJson(jsonPath);
+    const names = Array.from(usingComponents.keys());
+    if (names.length === 0) {
+      editor.setDecorations(componentDecorationType, []);
+      return;
+    }
+
+    findComponentTagDecorations(editor, text, 0, names, decorations);
+  } else {
+    editor.setDecorations(componentDecorationType, []);
+    return;
+  }
+
+  editor.setDecorations(componentDecorationType, decorations);
+}
+
+function findComponentTagDecorations(
+  editor: vscode.TextEditor,
+  searchText: string,
+  baseOffset: number,
+  componentNames: string[],
+  decorations: vscode.DecorationOptions[],
+): void {
+  for (const name of componentNames) {
+    const variants = new Set([name, toKebabCase(name)]);
+
+    for (const variant of variants) {
+      const escaped = escapeRegex(variant);
+      const re = new RegExp(`</?\\s*(${escaped})(?=[\\s/>])`, 'g');
+      let match: RegExpExecArray | null;
+
+      while ((match = re.exec(searchText)) !== null) {
+        const fullMatch = match[0];
+        const tagNameInMatch = match[1];
+        const tagNameOffset = fullMatch.indexOf(tagNameInMatch);
+        const absoluteStart = baseOffset + match.index + tagNameOffset;
+        const absoluteEnd = absoluteStart + tagNameInMatch.length;
+
+        const startPos = editor.document.positionAt(absoluteStart);
+        const endPos = editor.document.positionAt(absoluteEnd);
+        decorations.push({ range: new vscode.Range(startPos, endPos) });
+      }
+    }
+  }
+}

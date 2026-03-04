@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#34A065"/>
+      <stop offset="100%" stop-color="#24795A"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="32" fill="url(#bg)"/>
+
+  <g fill="none" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <!-- V shape (Vue) -->
+    <polyline points="58,66 84,112 110,66"/>
+
+    <!-- < bracket extending from V vertex -->
+    <polyline points="84,112 40,144 84,180"/>
+
+    <!-- / slash -->
+    <line x1="137" y1="56" x2="119" y2="200"/>
+
+    <!-- W shape (WeChat / WX) -->
+    <polyline points="146,66 162,112 178,76 194,112 210,66"/>
+
+    <!-- > bracket extending from W center -->
+    <polyline points="178,112 218,144 178,180"/>
+  </g>
+</svg>
