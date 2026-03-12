@@ -3,10 +3,47 @@ import * as path from 'path';
 import type { ParsedWxComponent, PropInfo } from '../types';
 import { findMatchingBracket, extractTopLevelKeys } from './parseUtils';
 
+const wxJsonCache = new Map<string, { signature: string; components: Map<string, string> }>();
+const wxComponentCache = new Map<string, { signature: string; parsed: ParsedWxComponent }>();
+const wxComponentPropsCache = new Map<string, { signature: string; props: PropInfo[] }>();
+
+function getFileSignature(filePath: string): string {
+  try {
+    const stat = fs.statSync(filePath);
+    return `${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return 'missing';
+  }
+}
+
+function readJsOrTs(basePath: string): string {
+  try {
+    return fs.readFileSync(basePath + '.js', 'utf-8');
+  } catch {
+    try {
+      return fs.readFileSync(basePath + '.ts', 'utf-8');
+    } catch {
+      return '';
+    }
+  }
+}
+
+export function clearWxParserCache(): void {
+  wxJsonCache.clear();
+  wxComponentCache.clear();
+  wxComponentPropsCache.clear();
+}
+
 /**
  * Parse a WeChat Mini Program JSON config file to extract usingComponents.
  */
 export function parseWxJson(jsonPath: string): Map<string, string> {
+  const signature = getFileSignature(jsonPath);
+  const cached = wxJsonCache.get(jsonPath);
+  if (cached && cached.signature === signature) {
+    return cached.components;
+  }
+
   const components = new Map<string, string>();
   try {
     const content = fs.readFileSync(jsonPath, 'utf-8');
@@ -21,6 +58,7 @@ export function parseWxJson(jsonPath: string): Map<string, string> {
   } catch {
     // ignore parse errors
   }
+  wxJsonCache.set(jsonPath, { signature, components });
   return components;
 }
 
@@ -164,30 +202,28 @@ function extractWxMethods(optionsBody: string): string[] {
  */
 export function parseWxComponent(basePath: string): ParsedWxComponent {
   const jsonPath = basePath + '.json';
-  const jsPath = basePath + '.js';
-  const tsPath = basePath + '.ts';
-
-  const usingComponents = parseWxJson(jsonPath);
-
-  let jsContent = '';
-  try {
-    jsContent = fs.readFileSync(jsPath, 'utf-8');
-  } catch {
-    try {
-      jsContent = fs.readFileSync(tsPath, 'utf-8');
-    } catch {
-      // no js/ts file
-    }
+  const signature = [
+    getFileSignature(jsonPath),
+    getFileSignature(basePath + '.js'),
+    getFileSignature(basePath + '.ts'),
+  ].join('|');
+  const cached = wxComponentCache.get(basePath);
+  if (cached && cached.signature === signature) {
+    return cached.parsed;
   }
 
-  const parsed = parseWxJs(jsContent);
+  const usingComponents = parseWxJson(jsonPath);
+  const jsContent = readJsOrTs(basePath);
 
-  return {
+  const parsed = parseWxJs(jsContent);
+  const result = {
     usingComponents,
     properties: parsed.properties,
     dataKeys: parsed.dataKeys,
     methodKeys: parsed.methodKeys,
   };
+  wxComponentCache.set(basePath, { signature, parsed: result });
+  return result;
 }
 
 /**
@@ -208,15 +244,21 @@ export function getWxJsonPath(wxmlPath: string): string {
  * Parse a target WX component's JS to get its properties (for prop completion).
  */
 export function parseWxComponentProps(componentBasePath: string): PropInfo[] {
-  let jsContent = '';
-  try {
-    jsContent = fs.readFileSync(componentBasePath + '.js', 'utf-8');
-  } catch {
-    try {
-      jsContent = fs.readFileSync(componentBasePath + '.ts', 'utf-8');
-    } catch {
-      return [];
-    }
+  const signature = [
+    getFileSignature(componentBasePath + '.js'),
+    getFileSignature(componentBasePath + '.ts'),
+  ].join('|');
+  const cached = wxComponentPropsCache.get(componentBasePath);
+  if (cached && cached.signature === signature) {
+    return cached.props;
   }
-  return parseWxJs(jsContent).properties;
+
+  const jsContent = readJsOrTs(componentBasePath);
+  if (!jsContent) {
+    return [];
+  }
+
+  const props = parseWxJs(jsContent).properties;
+  wxComponentPropsCache.set(componentBasePath, { signature, props });
+  return props;
 }

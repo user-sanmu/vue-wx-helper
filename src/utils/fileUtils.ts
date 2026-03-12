@@ -2,6 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
+const projectRootCache = new Map<string, string | undefined>();
+
 export function readFileSync(filePath: string): string | undefined {
   try {
     return fs.readFileSync(filePath, 'utf-8');
@@ -94,7 +96,18 @@ export function toPascalCase(str: string): string {
     .join('');
 }
 
-export function getWorkspaceRoot(): string | undefined {
+export function clearProjectRootCache(): void {
+  projectRootCache.clear();
+}
+
+export function getWorkspaceRoot(filePath?: string): string | undefined {
+  if (filePath) {
+    const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath));
+    if (folder) {
+      return folder.uri.fsPath;
+    }
+  }
+
   const folders = vscode.workspace.workspaceFolders;
   if (folders && folders.length > 0) {
     return folders[0].uri.fsPath;
@@ -108,19 +121,34 @@ export function getWorkspaceRoot(): string | undefined {
  * Falls back to workspace root if nothing is found.
  */
 export function findProjectRoot(filePath: string): string | undefined {
-  let dir = path.dirname(filePath);
-  const root = getWorkspaceRoot();
+  const root = getWorkspaceRoot(filePath);
+  if (!root) { return undefined; }
+
+  const startDir = filePath ? path.dirname(filePath) : root;
+  const cached = projectRootCache.get(startDir);
+  if (cached !== undefined || projectRootCache.has(startDir)) {
+    return cached;
+  }
+
+  let dir = startDir;
   const fsRoot = path.parse(dir).root;
+  const visitedDirs: string[] = [];
 
   while (dir && dir !== fsRoot) {
+    visitedDirs.push(dir);
     if (
       fileExistsSync(path.join(dir, 'package.json')) ||
       fileExistsSync(path.join(dir, 'app.json'))
     ) {
+      for (const visited of visitedDirs) {
+        projectRootCache.set(visited, dir);
+      }
       return dir;
     }
-    // Don't go above the workspace root
     if (root && dir === root) {
+      for (const visited of visitedDirs) {
+        projectRootCache.set(visited, root);
+      }
       return root;
     }
     const parent = path.dirname(dir);
@@ -128,6 +156,9 @@ export function findProjectRoot(filePath: string): string | undefined {
     dir = parent;
   }
 
+  for (const visited of visitedDirs) {
+    projectRootCache.set(visited, root);
+  }
   return root;
 }
 

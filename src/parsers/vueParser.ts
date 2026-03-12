@@ -1,6 +1,28 @@
 import type { ParsedVueSfc, PropInfo } from '../types';
 import { findMatchingBracket, extractTopLevelKeys, findOptionBlock, skipExpression } from './parseUtils';
 
+const MAX_VUE_PARSE_CACHE_SIZE = 50;
+const vueSfcCache = new Map<string, ParsedVueSfc>();
+const vuePropsCache = new Map<string, PropInfo[]>();
+
+function setLimitedCache<T>(cache: Map<string, T>, key: string, value: T): void {
+  if (cache.has(key)) {
+    cache.delete(key);
+  }
+  cache.set(key, value);
+  if (cache.size > MAX_VUE_PARSE_CACHE_SIZE) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey) {
+      cache.delete(oldestKey);
+    }
+  }
+}
+
+export function clearVueParserCache(): void {
+  vueSfcCache.clear();
+  vuePropsCache.clear();
+}
+
 export function extractScriptContent(content: string): string | undefined {
   const match = /<script[^>]*>([\s\S]*?)<\/script>/i.exec(content);
   return match ? match[1] : undefined;
@@ -327,6 +349,11 @@ function extractMethodKeys(script: string): string[] {
  * Parse a Vue Single File Component and extract all relevant information.
  */
 export function parseVueSfc(content: string): ParsedVueSfc {
+  const cached = vueSfcCache.get(content);
+  if (cached) {
+    return cached;
+  }
+
   const result: ParsedVueSfc = {
     components: new Map(),
     imports: new Map(),
@@ -346,6 +373,7 @@ export function parseVueSfc(content: string): ParsedVueSfc {
   result.computedKeys = extractComputedKeys(script);
   result.methodKeys = extractMethodKeys(script);
 
+  setLimitedCache(vueSfcCache, content, result);
   return result;
 }
 
@@ -354,7 +382,14 @@ export function parseVueSfc(content: string): ParsedVueSfc {
  * Useful for providing prop completions when using a child component.
  */
 export function parseVueComponentProps(content: string): PropInfo[] {
+  const cached = vuePropsCache.get(content);
+  if (cached) {
+    return cached;
+  }
+
   const script = extractScriptContent(content);
   if (!script) { return []; }
-  return extractProps(script);
+  const props = extractProps(script);
+  setLimitedCache(vuePropsCache, content, props);
+  return props;
 }

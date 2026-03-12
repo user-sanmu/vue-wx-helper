@@ -1,9 +1,8 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
 import { parseVueSfc, getTemplateRange, getScriptRange } from '../parsers/vueParser';
-import { parseWxComponent, getWxBasePath, parseWxJson, parseWxComponentProps } from '../parsers/wxParser';
+import { parseWxComponent, getWxBasePath, parseWxComponentProps } from '../parsers/wxParser';
 import { resolveVueComponent, resolveVueComponentByPath, resolveWxComponent, scanGlobalComponents } from '../parsers/componentResolver';
-import { toKebabCase, resolveWxComponentPath } from '../utils/fileUtils';
+import { fileExistsSync, toKebabCase } from '../utils/fileUtils';
 import type { PropInfo } from '../types';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -109,18 +108,20 @@ export class VueCompletionProvider implements vscode.CompletionItemProvider {
     const filePath = document.uri.fsPath;
     const text = document.getText();
     const offset = document.offsetAt(position);
-
-    const parsed = parseVueSfc(text);
     const templateRange = getTemplateRange(text);
-    const scriptRange = getScriptRange(text);
 
-    // In template
     if (templateRange && offset >= templateRange.start && offset <= templateRange.end) {
+      const parsed = parseVueSfc(text);
       return this.templateCompletions(filePath, text, offset, parsed, templateRange);
     }
 
-    // In script: this. completions
+    const scriptRange = getScriptRange(text);
     if (scriptRange && offset >= scriptRange.start && offset <= scriptRange.end) {
+      const before = text.substring(0, offset);
+      if (!/this\.\s*$/.test(before)) {
+        return [];
+      }
+      const parsed = parseVueSfc(text);
       return this.scriptCompletions(text, offset, parsed);
     }
 
@@ -235,14 +236,14 @@ export class WxmlCompletionProvider implements vscode.CompletionItemProvider {
     const filePath = document.uri.fsPath;
     const text = document.getText();
     const offset = document.offsetAt(position);
-    const basePath = getWxBasePath(filePath);
-    const wxComp = parseWxComponent(basePath);
     const items: vscode.CompletionItem[] = [];
 
     const before = text.substring(0, offset);
 
-    // Component name after `<`
     const tagTrigger = /<([a-zA-Z][\w-]*)?$/.exec(before);
+    const basePath = getWxBasePath(filePath);
+    const wxComp = parseWxComponent(basePath);
+
     if (tagTrigger) {
       for (const [name] of wxComp.usingComponents) {
         items.push(createComponentCompletionItem(name, false));
@@ -304,24 +305,20 @@ export class WxJsCompletionProvider implements vscode.CompletionItemProvider {
     position: vscode.Position,
   ): vscode.CompletionItem[] {
     const filePath = document.uri.fsPath;
-
-    // Only activate for WX mini program JS files
-    const basePath = filePath.replace(/\.(js|ts)$/, '');
-    const wxmlPath = basePath + '.wxml';
-    const jsonPath = basePath + '.json';
-    try {
-      require('fs').accessSync(jsonPath);
-    } catch {
-      try {
-        require('fs').accessSync(wxmlPath);
-      } catch {
-        return [];
-      }
-    }
-
     const text = document.getText();
     const offset = document.offsetAt(position);
     const before = text.substring(0, offset);
+
+    if (!/this\.(?:data\.)?\s*$/.test(before)) {
+      return [];
+    }
+
+    const basePath = filePath.replace(/\.(js|ts)$/, '');
+    const wxmlPath = basePath + '.wxml';
+    const jsonPath = basePath + '.json';
+    if (!fileExistsSync(jsonPath) && !fileExistsSync(wxmlPath)) {
+      return [];
+    }
 
     const wxComp = parseWxComponent(basePath);
     const items: vscode.CompletionItem[] = [];

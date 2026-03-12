@@ -2,9 +2,17 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import type { ComponentInfo, PropInfo } from '../types';
-import { fileExistsSync, findProjectRoot, toPascalCase } from '../utils/fileUtils';
+import { fileExistsSync, findProjectRoot, resolveVueComponentPath, toKebabCase, toPascalCase } from '../utils/fileUtils';
 import { parseVueComponentProps } from './vueParser';
 import { parseWxComponentProps } from './wxParser';
+
+interface GlobalComponentIndex {
+  byName: Map<string, ComponentInfo>;
+  components: ComponentInfo[];
+}
+
+const globalComponentCache = new Map<string, GlobalComponentIndex>();
+const vueComponentResolveCache = new Map<string, { mtimeMs: number; result: { resolvedPath: string; props: PropInfo[] } }>();
 
 function isWxProject(root: string): boolean {
   return fileExistsSync(path.join(root, 'app.json'));
@@ -22,20 +30,21 @@ function getComponentFolders(root: string): string[] {
   return ['src/components', 'src/component'];
 }
 
-/**
- * Scan global component folders and return discovered components.
- * Auto-detects project type (Vue vs WX) based on app.json existence.
- * For multi-project workspaces, uses the project root nearest to `currentFilePath`.
- */
-export function scanGlobalComponents(isWx: boolean, currentFilePath?: string): ComponentInfo[] {
-  const root = currentFilePath ? findProjectRoot(currentFilePath) : findProjectRoot('');
-  if (!root) {
-    return [];
+function getFileMtimeMs(filePath: string): number | undefined {
+  try {
+    return fs.statSync(filePath).mtimeMs;
+  } catch {
+    return undefined;
   }
+}
 
-  const folders = getComponentFolders(root);
+function getGlobalCacheKey(root: string, isWx: boolean, folders: string[]): string {
+  return `${root}::${isWx ? 'wx' : 'vue'}::${folders.join('|')}`;
+}
 
-  const results: ComponentInfo[] = [];
+function buildGlobalComponentIndex(root: string, isWx: boolean, folders: string[]): GlobalComponentIndex {
+  const components: ComponentInfo[] = [];
+  const byName = new Map<string, ComponentInfo>();
 
   for (const folder of folders) {
     const folderPath = path.join(root, folder);
@@ -47,62 +56,116 @@ export function scanGlobalComponents(isWx: boolean, currentFilePath?: string): C
       const entries = fs.readdirSync(folderPath, { withFileTypes: true });
       for (const entry of entries) {
         if (isWx) {
-          if (entry.isDirectory()) {
-            const compName = entry.name;
-            const compDir = path.join(folderPath, compName);
-            const jsPath = path.join(compDir, compName + '.js');
-            const jsonPath = path.join(compDir, compName + '.json');
-            if (fileExistsSync(jsPath) || fileExistsSync(jsonPath)) {
-              results.push({
-                name: compName,
-                importPath: `./${folder}/${compName}/${compName}`,
-                resolvedPath: fileExistsSync(jsPath) ? jsPath : jsonPath,
-                isGlobal: true,
-              });
-            }
+          if (!entry.isDirectory()) {
+            continue;
           }
-        } else {
-          if (entry.isFile() && entry.name.endsWith('.vue')) {
-            const compName = entry.name.replace(/\.vue$/, '');
-            const resolvedPath = path.join(folderPath, entry.name);
-            results.push({
-              name: toPascalCase(compName),
-              importPath: `./${folder}/${entry.name}`,
-              resolvedPath,
+          const compName = entry.name;
+          const compDir = path.join(folderPath, compName);
+          const jsPath = path.join(compDir, compName + '.js');
+          const jsonPath = path.join(compDir, compName + '.json');
+          if (fileExistsSync(jsPath) || fileExistsSync(jsonPath)) {
+            const component: ComponentInfo = {
+              name: compName,
+              importPath: `./${folder}/${compName}/${compName}`,
+              resolvedPath: fileExistsSync(jsPath) ? jsPath : jsonPath,
               isGlobal: true,
-            });
-          } else if (entry.isDirectory()) {
-            const compDir = path.join(folderPath, entry.name);
-            const indexVue = path.join(compDir, 'index.vue');
-            const namedVue = path.join(compDir, entry.name + '.vue');
-            const resolved = fileExistsSync(indexVue) ? indexVue
-              : fileExistsSync(namedVue) ? namedVue : undefined;
-            if (resolved) {
-              results.push({
-                name: toPascalCase(entry.name),
-                importPath: `./${folder}/${entry.name}`,
-                resolvedPath: resolved,
-                isGlobal: true,
-              });
-            }
+            };
+            components.push(component);
+            byName.set(component.name, component);
+          }
+          continue;
+        }
+
+        if (entry.isFile() && entry.name.endsWith('.vue')) {
+          const compName = entry.name.replace(/\.vue$/, '');
+          const component: ComponentInfo = {
+            name: toPascalCase(compName),
+            importPath: `./${folder}/${entry.name}`,
+            resolvedPath: path.join(folderPath, entry.name),
+            isGlobal: true,
+          };
+          components.push(component);
+          byName.set(component.name, component);
+          byName.set(toKebabCase(component.name), component);
+        } else if (entry.isDirectory()) {
+          const compDir = path.join(folderPath, entry.name);
+          const indexVue = path.join(compDir, 'index.vue');
+          const namedVue = path.join(compDir, entry.name + '.vue');
+          const resolved = fileExistsSync(indexVue) ? indexVue
+            : fileExistsSync(namedVue) ? namedVue : undefined;
+          if (resolved) {
+            const component: ComponentInfo = {
+              name: toPascalCase(entry.name),
+              importPath: `./${folder}/${entry.name}`,
+              resolvedPath: resolved,
+              isGlobal: true,
+            };
+            components.push(component);
+            byName.set(component.name, component);
+            byName.set(toKebabCase(component.name), component);
           }
         }
       }
     } catch {
+      // ignore unreadable folders
     }
   }
 
-  return results;
+  return { byName, components };
+}
+
+function getGlobalComponentIndex(isWx: boolean, currentFilePath?: string): GlobalComponentIndex {
+  const root = currentFilePath ? findProjectRoot(currentFilePath) : findProjectRoot('');
+  if (!root) {
+    return { byName: new Map(), components: [] };
+  }
+
+  const folders = getComponentFolders(root);
+  const cacheKey = getGlobalCacheKey(root, isWx, folders);
+  const cached = globalComponentCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const built = buildGlobalComponentIndex(root, isWx, folders);
+  globalComponentCache.set(cacheKey, built);
+  return built;
+}
+
+export function clearComponentResolverCache(): void {
+  globalComponentCache.clear();
+  vueComponentResolveCache.clear();
+}
+
+export function findGlobalComponent(name: string, isWx: boolean, currentFilePath?: string): ComponentInfo | undefined {
+  return getGlobalComponentIndex(isWx, currentFilePath).byName.get(name);
+}
+
+/**
+ * Scan global component folders and return discovered components.
+ * Auto-detects project type (Vue vs WX) based on app.json existence.
+ * For multi-project workspaces, uses the project root nearest to `currentFilePath`.
+ */
+export function scanGlobalComponents(isWx: boolean, currentFilePath?: string): ComponentInfo[] {
+  return getGlobalComponentIndex(isWx, currentFilePath).components;
 }
 
 /**
  * Resolve a Vue component's props from an absolute file path.
  */
 export function resolveVueComponentByPath(resolvedPath: string): { resolvedPath: string; props: PropInfo[] } {
+  const mtimeMs = getFileMtimeMs(resolvedPath);
+  const cached = vueComponentResolveCache.get(resolvedPath);
+  if (cached && cached.mtimeMs === mtimeMs) {
+    return cached.result;
+  }
+
   try {
     const content = fs.readFileSync(resolvedPath, 'utf-8');
     const props = parseVueComponentProps(content);
-    return { resolvedPath, props };
+    const result = { resolvedPath, props };
+    vueComponentResolveCache.set(resolvedPath, { mtimeMs: mtimeMs ?? -1, result });
+    return result;
   } catch {
     return { resolvedPath, props: [] };
   }
@@ -112,29 +175,13 @@ export function resolveVueComponentByPath(resolvedPath: string): { resolvedPath:
  * Resolve a Vue component from a relative import path (for locally imported components).
  */
 export function resolveVueComponent(currentFilePath: string, importPath: string): { resolvedPath?: string; props: PropInfo[] } {
-  const dir = path.dirname(currentFilePath);
-
   if (!importPath.startsWith('.') && !importPath.startsWith('/')) {
     return { props: [] };
   }
-
-  const resolved = path.resolve(dir, importPath);
-  const candidates = [
-    resolved,
-    resolved + '.vue',
-    path.join(resolved, 'index.vue'),
-    resolved + '.js',
-    path.join(resolved, 'index.js'),
-    resolved + '.ts',
-    path.join(resolved, 'index.ts'),
-  ];
-
-  for (const c of candidates) {
-    if (fileExistsSync(c)) {
-      return resolveVueComponentByPath(c);
-    }
+  const resolvedPath = resolveVueComponentPath(currentFilePath, importPath);
+  if (resolvedPath) {
+    return resolveVueComponentByPath(resolvedPath);
   }
-
   return { props: [] };
 }
 

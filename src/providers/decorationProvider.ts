@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { parseVueSfc, getTemplateRange } from '../parsers/vueParser';
 import { parseWxJson } from '../parsers/wxParser';
 import { scanGlobalComponents } from '../parsers/componentResolver';
-import { toKebabCase, escapeRegex } from '../utils/fileUtils';
+import { toKebabCase } from '../utils/fileUtils';
 
 const COMPONENT_TAG_COLOR = '#4EC9B0';
 
@@ -95,25 +95,28 @@ function findComponentTagDecorations(
   componentNames: string[],
   decorations: vscode.DecorationOptions[],
 ): void {
+  const knownNames = new Set<string>();
   for (const name of componentNames) {
-    const variants = new Set([name, toKebabCase(name)]);
+    knownNames.add(name);
+    knownNames.add(toKebabCase(name));
+  }
 
-    for (const variant of variants) {
-      const escaped = escapeRegex(variant);
-      const re = new RegExp(`</?\\s*(${escaped})(?=[\\s/>])`, 'g');
-      let match: RegExpExecArray | null;
+  const tagRe = /<\/?\s*([a-zA-Z][\w-]*)(?=[\s/>])/g;
+  let match: RegExpExecArray | null;
 
-      while ((match = re.exec(searchText)) !== null) {
-        const fullMatch = match[0];
-        const tagNameInMatch = match[1];
-        const tagNameOffset = fullMatch.indexOf(tagNameInMatch);
-        const absoluteStart = baseOffset + match.index + tagNameOffset;
-        const absoluteEnd = absoluteStart + tagNameInMatch.length;
-
-        const startPos = editor.document.positionAt(absoluteStart);
-        const endPos = editor.document.positionAt(absoluteEnd);
-        decorations.push({ range: new vscode.Range(startPos, endPos) });
-      }
+  while ((match = tagRe.exec(searchText)) !== null) {
+    const tagNameInMatch = match[1];
+    if (!knownNames.has(tagNameInMatch)) {
+      continue;
     }
+
+    const fullMatch = match[0];
+    const tagNameOffset = fullMatch.indexOf(tagNameInMatch);
+    const absoluteStart = baseOffset + match.index + tagNameOffset;
+    const absoluteEnd = absoluteStart + tagNameInMatch.length;
+
+    const startPos = editor.document.positionAt(absoluteStart);
+    const endPos = editor.document.positionAt(absoluteEnd);
+    decorations.push({ range: new vscode.Range(startPos, endPos) });
   }
 }
